@@ -133,7 +133,7 @@ def run_auto_research():
             roi_percent = round((profit_jpy / total_cost_jpy) * 100, 1)
 
             # 🔥 利益2,000円以上 ＆ ROI 15%以上 のみフィルタリング通知
-            if profit_jpy >= 2000 and roi_percent >= 15.0:
+            if profit_jpy >= 0:
                 print(f"🔥 お宝発見!: {title}")
                 print(f"   仕入(実売): ${actual_price_usd} (約{round(total_cost_jpy):,}円)")
                 print(f"   想定国内相場: {jp_market_jpy:,}円 ➔ 利益: {profit_jpy:,}円 (ROI: {roi_percent}%)")
