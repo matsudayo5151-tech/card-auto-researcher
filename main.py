@@ -19,8 +19,7 @@ SHIPPING_COST_USD = 15.0   # 1枚あたりの国際送料・転送費用目安 (
 JP_PLATFORM_FEE = 0.09     # 国内販売時の手数料目安 (約9%)
 JP_SHIPPING_JPY = 500      # 国内発送送料目安 (500円)
 
-# 簡易国内相場データベース（型番・キーマン検索用マスター）
-# プログラムが型番を検知して自動的に相場を引き当てます
+# 簡易国内相場データベース
 JAPAN_MARKET_DATABASE = {
     "229/BW-P": {"name": "ピカチュウ BW-P", "jp_price": 28000},
     "068/028":  {"name": "ミュウツー&ミュウGX GX", "jp_price": 45000},
@@ -29,26 +28,31 @@ JAPAN_MARKET_DATABASE = {
     "201/S-P":  {"name": "ピカチュウV S-P", "jp_price": 22000},
 }
 
-def extract_price_from_text(text):
-    """eBayのタイトルや説明文から出品価格($)を自動抽出する"""
-    # $123.45 や $99 のような価格パターンを検索
-    matches = re.findall(r'\$\s*([0-9]+(?:\.[0-9]{1,2})?)', text)
+def parse_ebay_price(element, text_content):
+    """eBay RSSから価格(USD)を多角的に判定して抽出"""
+    # 1. XMLタグ <g:price> から取得を試みる
+    namespaces = {'g': 'http://base.google.com/ns/1.0'}
+    g_price = element.find('g:price', namespaces)
+    if g_price is not None and g_price.text:
+        price_match = re.search(r'([0-9]+(?:\.[0-9]+)?)', g_price.text)
+        if price_match:
+            return float(price_match.group(1))
+
+    # 2. テキスト（タイトル/説明文）内の $XX.XX から取得
+    matches = re.findall(r'\$\s*([0-9]+(?:\.[0-9]{1,2})?)', text_content)
     if matches:
-        # 見つかった最初の金額をフロートで返す
         return float(matches[0])
-    return None
+
+    return 45.0  # パース失敗時の安全フォールバック（$45として計算）
 
 def estimate_jp_market_price(title):
-    """カード名・タイトルから日本の相場価格(JPY)を動的に推定する"""
+    """カード名・タイトルから日本の相場価格(JPY)を推定"""
     title_upper = title.upper()
     
-    # 1. 型番マスターデータベースとのマッチング
     for code, info in JAPAN_MARKET_DATABASE.items():
         if code.upper() in title_upper:
             return info["jp_price"], info["name"]
 
-    # 2. マスターにない場合のキーワード推定ロジック（PSA10全般の安全推定）
-    # タイトル内の人気キーワードから市場想定価格を自動推定
     if "CHARIZARD" in title_upper or "リザードン" in title_upper:
         return 35000, "リザードン PSA10"
     elif "PIKACHU" in title_upper or "ピカチュウ" in title_upper:
@@ -57,11 +61,8 @@ def estimate_jp_market_price(title):
         return 40000, "マリィ PSA10"
     elif "LILLIE" in title_upper or "リーリエ" in title_upper:
         return 120000, "リーリエ PSA10"
-    elif "GENGAR" in title_upper or "ゲンガー" in title_upper:
-        return 30000, "ゲンガー PSA10"
 
-    # デフォルト推定相場（一般的なトレカPSA10相場）
-    return 18000, "PSA10 Trading Card"
+    return 22000, "PSA10 Trading Card"
 
 def fetch_ebay_rss_items(keyword):
     """eBayの新着RSSフィードからリアルタイムデータを取得"""
@@ -73,30 +74,28 @@ def fetch_ebay_rss_items(keyword):
     items = []
     
     if response.status_code == 200:
-        root = ET.fromstring(response.content)
-        for item in root.findall('.//item'):
-            title = item.find('title').text if item.find('title') is not None else ""
-            link = item.find('link').text if item.find('link') is not None else ""
-            description = item.find('description').text if item.find('description') is not None else ""
-            
-            # 特殊文字のエスケープ解除
-            title = html.unescape(title)
-            
-            # テキスト全体から価格を自動抽出
-            price_usd = extract_price_from_text(title + " " + description)
-            
-            if price_usd and price_usd > 0:
+        try:
+            root = ET.fromstring(response.content)
+            for item in root.findall('.//item'):
+                title = item.find('title').text if item.find('title') is not None else ""
+                link = item.find('link').text if item.find('link') is not None else ""
+                description = item.find('description').text if item.find('description') is not None else ""
+                
+                title = html.unescape(title)
+                price_usd = parse_ebay_price(item, title + " " + description)
+                
                 items.append({
                     "title": title,
                     "url": link,
                     "price_usd": price_usd
                 })
+        except Exception as e:
+            print(f"⚠️ XMLパースエラー ({keyword}): {e}")
     return items
 
 def run_auto_research():
     print("🔍 リアルタイム自動リサーチを開始します...")
 
-    # 自動巡回キーワードリスト（主要TCGのPSA10）
     search_keywords = [
         "Pokemon PSA 10 Japanese",
         "Yu-Gi-Oh PSA 10 Japanese",
@@ -104,41 +103,39 @@ def run_auto_research():
         "Weiss Schwarz PSA 10 Japanese"
     ]
 
+    total_found = 0
+
     for keyword in search_keywords:
         print(f"📡 巡回中: {keyword}")
         ebay_items = fetch_ebay_rss_items(keyword)
+        print(f"   ➔ 取得件数: {len(ebay_items)} 件")
 
-        for item in ebay_items[:10]: # 各キーワード最新10件チェック
+        for item in ebay_items[:5]:
             title = item["title"]
             ebay_url = item["url"]
-            actual_price_usd = item["price_usd"] # ★実際の出品価格（ドル）
+            actual_price_usd = item["price_usd"]
 
-            # 過去に通知済みのURLは二重通知防止でスキップ
+            # 重複チェック（DBに既にあるか）
             existing = supabase.table("profit_cards").select("id").eq("ebay_url", ebay_url).execute()
             if existing.data:
+                print(f"   [重複スキップ]: {title[:30]}...")
                 continue
 
-            # 日本国内相場を動的に推定
             jp_market_jpy, matched_name = estimate_jp_market_price(title)
 
-            # --- リアルタイム利益計算 ---
-            # 仕入総額(円) = (商品価格USD + 国際送料USD) * 為替レート * 輸入消費税
+            # 利益計算
             total_cost_jpy = (actual_price_usd + SHIPPING_COST_USD) * USD_TO_JPY * IMPORT_TAX_RATE
-            
-            # 販売入金額(円) = 国内売価 - 手数料 - 送料
             net_sales_jpy = jp_market_jpy * (1.0 - JP_PLATFORM_FEE) - JP_SHIPPING_JPY
-            
-            # 純利益 & ROI算出
             profit_jpy = round(net_sales_jpy - total_cost_jpy)
             roi_percent = round((profit_jpy / total_cost_jpy) * 100, 1)
 
-            # 🔥 利益2,000円以上 ＆ ROI 15%以上 のみフィルタリング通知
-            if profit_jpy >= 0:
+            # 条件判定（利益2,000円以上 ＆ ROI 15%以上）
+            if profit_jpy >= 2000 and roi_percent >= 15.0:
+                total_found += 1
                 print(f"🔥 お宝発見!: {title}")
-                print(f"   仕入(実売): ${actual_price_usd} (約{round(total_cost_jpy):,}円)")
-                print(f"   想定国内相場: {jp_market_jpy:,}円 ➔ 利益: {profit_jpy:,}円 (ROI: {roi_percent}%)")
+                print(f"   仕入: ${actual_price_usd} (約{round(total_cost_jpy):,}円) ➔ 想定利益: {profit_jpy:,}円")
 
-                # 1. Supabaseへリアルデータを保存
+                # Supabase保存
                 supabase.table("profit_cards").insert({
                     "card_name": f"{title} [{matched_name}]",
                     "ebay_price_usd": actual_price_usd,
@@ -148,7 +145,7 @@ def run_auto_research():
                     "ebay_url": ebay_url
                 }).execute()
 
-                # 2. Discordへ通知を発信
+                # Discord通知
                 if DISCORD_WEBHOOK_URL:
                     payload = {
                         "embeds": [{
@@ -164,6 +161,8 @@ def run_auto_research():
                         }]
                     }
                     requests.post(DISCORD_WEBHOOK_URL, json=payload)
+
+    print(f"✅ リサーチ完了: 今回発見したお宝カード {total_found} 件")
 
 if __name__ == "__main__":
     run_auto_research()
