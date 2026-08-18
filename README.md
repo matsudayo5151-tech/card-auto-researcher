@@ -1,0 +1,1 @@
+# card-auto-researcher
