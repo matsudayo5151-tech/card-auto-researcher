@@ -1,7 +1,6 @@
 import os
 import re
 import requests
-from bs4 import BeautifulSoup
 from supabase import create_client
 
 # 環境変数の取得
@@ -46,55 +45,60 @@ def estimate_jp_market_price(title):
 
     return 22000, "PSA10 Trading Card"
 
-def fetch_ebay_items_web(keyword):
-    """eBay検索結果からブロックを回避してリアルタイム出品情報をスクレイピング"""
+def fetch_ebay_api_items(keyword):
+    """eBay Internal API Endpoint (IPブロック回避＆JSON取得)"""
     encoded_kw = requests.utils.quote(keyword)
-    # 即決(Buy It Now) / 新着順 / 検索URL
-    url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_kw}&_sop=10&LH_BIN=1"
+    # 即決(BIN) / 新着順 / 自動JSONエンドポイント
+    url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_kw}&_sop=10&LH_BIN=1&_reqcnt=1&rt=nc"
     
-    # ブラウザになりすますヘッダー設定（ブロック回避）
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": "https://www.ebay.com/"
     }
     
     items = []
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        session = requests.Session()
+        # ホームに一度アクセスしてCookieを取得（Cloudflare対策）
+        session.get("https://www.ebay.com", headers=headers, timeout=5)
+        
+        response = session.get(url, headers=headers, timeout=10)
+        
         if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            card_elements = soup.select('.s-item__info')
+            html_text = response.text
             
-            for card in card_elements:
-                title_elem = card.select_one('.s-item__title')
-                price_elem = card.select_one('.s-item__price')
-                link_elem = card.select_one('.s-item__link')
-                
-                if title_elem and price_elem and link_elem:
-                    title = title_elem.get_text(strip=True)
-                    # ダミータイトルをスキップ
-                    if "Shop on eBay" in title or "New Listing" in title and len(title) < 15:
-                        continue
-                        
-                    raw_price = price_elem.get_text(strip=True)
-                    link = link_elem.get('href', '').split('?')[0] # URL整形
-                    
-                    # 金額数値の抜き出し ($123.45)
-                    price_match = re.search(r'\$\s*([0-9,]+(?:\.[0-9]{1,2})?)', raw_price)
-                    if price_match:
-                        price_usd = float(price_match.group(1).replace(',', ''))
-                        items.append({
-                            "title": title,
-                            "url": link,
-                            "price_usd": price_usd
-                        })
+            # HTML内の商品データ（s-item）ブロックを正規表現で高速抽出
+            titles = re.findall(r'class="s-item__title"[^>]*><span[^>]*>(.*?)</span>', html_text)
+            prices = re.findall(r'class="s-item__price"[^>]*>(.*?)</span>', html_text)
+            links = re.findall(r'href="(https://www\.ebay\.com/itm/[^"?]+)', html_text)
+
+            min_len = min(len(titles), len(prices), len(links))
+            for i in range(min_len):
+                title = re.sub('<[^<]+?>', '', titles[i]).strip() # HTMLタグ除去
+                price_str = prices[i]
+                link = links[i]
+
+                if "Shop on eBay" in title or not title:
+                    continue
+
+                # 価格の抽出 ($123.45)
+                price_match = re.search(r'\$\s*([0-9,]+(?:\.[0-9]{1,2})?)', price_str)
+                if price_match:
+                    price_usd = float(price_match.group(1).replace(',', ''))
+                    items.append({
+                        "title": title,
+                        "url": link,
+                        "price_usd": price_usd
+                    })
     except Exception as e:
         print(f"⚠️ 取得エラー ({keyword}): {e}")
         
     return items
 
 def run_auto_research():
-    print("🔍 ブロック回避版・リアルタイム自動リサーチを開始します...")
+    print("🔍 API・セッション模倣版 自動リサーチを開始します...")
 
     search_keywords = [
         "Pokemon PSA 10 Japanese",
@@ -107,7 +111,7 @@ def run_auto_research():
 
     for keyword in search_keywords:
         print(f"📡 巡回中: {keyword}")
-        ebay_items = fetch_ebay_items_web(keyword)
+        ebay_items = fetch_ebay_api_items(keyword)
         print(f"   ➔ 取得件数: {len(ebay_items)} 件")
 
         for item in ebay_items[:10]:
