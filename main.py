@@ -140,4 +140,4 @@ def run_auto_research():
     print(f"✅ 処理完了: 新規発見お宝カード {total_found} 件")
 
 if __name__ == "__main__":
-    run_auto_research)
+    run_auto_research()
