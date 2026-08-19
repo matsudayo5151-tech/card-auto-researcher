@@ -2,6 +2,7 @@ import os
 import csv
 import re
 import requests
+import xml.etree.ElementTree as ET
 from supabase import create_client
 
 # 環境変数の取得
@@ -26,6 +27,76 @@ JAPAN_MARKET_DATABASE = {
     "001/S-P":  {"name": "ピカチュウ VMAX", "jp_price": 35000},
     "201/S-P":  {"name": "ピカチュウV", "jp_price": 22000},
 }
+
+def fetch_ebay_via_rss(keyword):
+    """eBay RSSフィードから最新出品情報を自動取得する（AppID不要）"""
+    encoded_keyword = requests.utils.quote(keyword)
+    # LH_BIN=1 (Buy It Now / 即決のみ), _sop=10 (新着順)
+    rss_url = f"https://www.ebay.com/sch/i.html?_nkw={encoded_keyword}&_rss=1&LH_BIN=1&_sop=10"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    items = []
+    try:
+        res = requests.get(rss_url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            root = ET.fromstring(res.text)
+            # RSS2.0の <item> タグを解析
+            for item in root.findall(".//item"):
+                title = item.find("title").text if item.find("title") is not None else ""
+                link = item.find("link").text if item.find("link") is not None else ""
+                
+                # 価格の抽出 (description内の金額表記や標準タグから取得)
+                description = item.find("description").text if item.find("description") is not None else ""
+                price_match = re.search(r"\$\s*([\d,]+\.\d{2})", description)
+                
+                if price_match:
+                    price_usd = float(price_match.group(1).replace(",", ""))
+                else:
+                    price_usd = 0.0
+
+                if title and price_usd > 0 and link:
+                    # Clean up URL parameters
+                    clean_link = link.split("?")[0]
+                    items.append({
+                        "title": title,
+                        "price_usd": price_usd,
+                        "ebay_url": clean_link
+                    })
+    except Exception as e:
+        print(f"⚠️ RSS取得エラー ({keyword}): {e}")
+
+    return items
+
+def fetch_and_save_ebay_csv(file_path="ebay_items.csv"):
+    """RSS経由で全キーワードの最新データを取得しCSV化"""
+    search_keywords = [
+        "Pokemon PSA 10 Japanese",
+        "Yu-Gi-Oh PSA 10 Japanese",
+        "One Piece Card PSA 10 Japanese",
+        "Weiss Schwarz PSA 10 Japanese"
+    ]
+
+    all_fetched_items = []
+    print("📡 eBay RSSフィードから最新データの一括取得を開始します...")
+
+    for keyword in search_keywords:
+        fetched = fetch_ebay_via_rss(keyword)
+        print(f"   ➔ {keyword}: {len(fetched)} 件取得")
+        all_fetched_items.extend(fetched)
+
+    # 重複削除
+    unique_items = {item["ebay_url"]: item for item in all_fetched_items}.values()
+
+    # CSVファイルへ上書き保存
+    with open(file_path, mode="w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["title", "price_usd", "ebay_url"])
+        writer.writeheader()
+        writer.writerows(unique_items)
+
+    print(f"💾 合計 {len(unique_items)} 件の最新商品を {file_path} に自動保存しました。")
 
 def estimate_jp_market_price(title):
     """カード名・タイトルから日本の相場価格(JPY)を推定"""
@@ -58,7 +129,6 @@ def load_items_from_csv(file_path="ebay_items.csv"):
         for row in reader:
             try:
                 title = row.get("title", "").strip()
-                # 価格の文字列整理 ($120.00 ➔ 120.00)
                 price_raw = str(row.get("price_usd", "0")).replace("$", "").replace(",", "").strip()
                 price_usd = float(price_raw)
                 ebay_url = row.get("ebay_url", "").strip()
@@ -75,13 +145,17 @@ def load_items_from_csv(file_path="ebay_items.csv"):
     return items
 
 def run_auto_research():
-    print("🔍 CSVベース リサーチシステムを開始します...")
+    print("🔍 RSS自動生成＆リサーチシステムを開始します...")
 
+    # 1. RSS経由で最新データを取得しCSVを自動作成
+    fetch_and_save_ebay_csv("ebay_items.csv")
+
+    # 2. 生成されたCSVを解析
     ebay_items = load_items_from_csv("ebay_items.csv")
-    print(f"📊 CSVから読み込んだ総件数: {len(ebay_items)} 件")
+    print(f"📊 解析対象件数: {len(ebay_items)} 件")
 
     if not ebay_items:
-        print("💡 処理を終了します。（CSVにデータがないか、形式が不適切です）")
+        print("💡 処理を終了します。（データが取得できませんでした）")
         return
 
     total_found = 0
